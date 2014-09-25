@@ -108,7 +108,6 @@ int main(int argc, char const** argv) {
     if (rc != 0) die("pcap_set_timeout failed");
     rc = pcap_set_buffer_size(pc, 125000 * read_timeout_ms);
     if (rc != 0) die("pcap_set_buffer_size failed");
-
     //
     // Start capturing
     //
