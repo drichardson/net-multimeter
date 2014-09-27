@@ -1,8 +1,8 @@
-OBJS=net-counter.o debug.o ethernet.o ipv4.o
+OBJS=accumulator.o debug.o ethernet.o ipv4.o
 CC=gcc
 CFLAGS=-Wall -Werror -std=c11 -O3
 
-net-counter: $(OBJS)
+accumulator: $(OBJS)
 	$(CC) -o $@ $^ -lpcap
 
 clean:

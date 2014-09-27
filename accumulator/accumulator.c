@@ -79,7 +79,15 @@ print_captured_data(u8 const* data, int data_len) {
 int main(int argc, char const** argv) {
     char errbuf[PCAP_ERRBUF_SIZE];
     int rc;
-    char const* source = "eth0";
+
+    if (argc != 4) {
+        fprintf(stderr, "Missing required arguments.\nUsage: accumulator <interface> <capture_path> <publish_path>\n");
+        exit(1);
+    }
+
+    char const* source = argv[1];
+    //char const* capture_path = argv[2];
+    //char const* publish_path = argv[3];
 
     printf("libpcap version: %s\n", pcap_lib_version());
 
