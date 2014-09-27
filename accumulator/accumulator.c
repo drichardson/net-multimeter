@@ -130,10 +130,13 @@ publish_json(app_state const* state, char const* json_path) {
         return;
     }
 
-    fputs("{}", tf.fp);
+    static int count = 0;
+    fprintf(tf.fp, "{%d}", ++count);
 
     if(!transact_file_close(&tf, true)) {
         fprintf(stderr, "transact_file_open failed to commit and close %s. %s", json_path, strerror(errno));
+    } else {
+        printf("published to %s\n", json_path);
     }
 }
 

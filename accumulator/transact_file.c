@@ -11,7 +11,7 @@ bool transact_file_open(transact_file* tf, char const* path) {
     strcpy(tmp, path);
     strcpy(tmp+path_len, ".TX");
 
-    int fd = open(tmp, O_CREAT | O_EXCL | O_WRONLY);
+    int fd = open(tmp, O_CREAT | O_EXCL | O_WRONLY, 0666);
     if (fd == -1) {
         free(tmp);
         return false;
