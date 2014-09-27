@@ -1,0 +1,9 @@
+[Unit]
+Description=Network Multimeter Accumulator
+
+[Service]
+ExecStart=/opt/net-multimeter/bin/accumulator--capture-dir=/tmp/net-multimeter/capture
+
+[Install]
+WantedBy=multi-user.target
+

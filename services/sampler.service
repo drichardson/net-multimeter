@@ -1,0 +1,10 @@
+[Unit]
+Description=Network Multimeter Sampler
+
+[Service]
+ExecStartPre=/usr/bin/mkdir -p /tmp/net-multimeter/capture
+ExecStart=/usr/bin/tcpdump -i eth0 -G 10 -w /tmp/net-multimeter/capture/%s.pcap -s 58
+
+[Install]
+WantedBy=multi-user.target
+
