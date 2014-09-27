@@ -1,22 +1,23 @@
-// pcap was complaining until I defined _BSD_SOURCE. _GNU_SOURCE also seems to work.
-#define _BSD_SOURCE
-
 #include "compare.h"
 #include "debug.h"
 #include "ethernet.h"
 #include "ipv4.h"
+#include "likely.h"
 #include "tcp.h"
 #include "udp.h"
+#include <errno.h>
 #include <pcap/pcap.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/inotify.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 
-static void
-die(char const* msg) {
-    fputs(msg, stderr);
-    exit(1);
-}
+typedef struct app_state {
+} app_state;
 
 static void
 print_captured_data(u8 const* data, int data_len) {
@@ -76,61 +77,20 @@ print_captured_data(u8 const* data, int data_len) {
     }
 }
 
-int main(int argc, char const** argv) {
+static bool
+process_pcap_file(app_state* state, char const* filename) {
     char errbuf[PCAP_ERRBUF_SIZE];
-    int rc;
-
-    if (argc != 4) {
-        fprintf(stderr, "Missing required arguments.\nUsage: accumulator <interface> <capture_path> <publish_path>\n");
-        exit(1);
-    }
-
-    char const* source = argv[1];
-    //char const* capture_path = argv[2];
-    //char const* publish_path = argv[3];
-
-    printf("libpcap version: %s\n", pcap_lib_version());
-
-    //
-    // Create new pcap
-    //
-    printf("Using source %s\n", source);
-    pcap_t* pc = pcap_create(source, errbuf);
+    pcap_t* pc = pcap_open_offline(filename, errbuf);
     if (pc == NULL) {
-        fprintf(stderr, "pcap_create failed on source %s. %s\n", source, errbuf);
-        exit(1);
-    }   
-
-    //
-    // Configure pcap options
-    //
-    rc = pcap_set_snaplen(pc, 100);
-    if (rc != 0) die("pcap_set_snaplen failed");
-    rc = pcap_set_promisc(pc, 0);
-    if (rc != 0) die("pcap_set_promisc failed");
-    // 1Gbit/1s * 1s/1000ms = 1Mbit/1ms. Therefore, on a 1Gbps network, each ms
-    // of read delay can fill up 1Mbit of buffer which is
-    // 1Mbit*(1byte/8bit)=125k bytes per ms.
-    int const read_timeout_ms = 1000;
-    rc = pcap_set_timeout(pc, read_timeout_ms);
-    if (rc != 0) die("pcap_set_timeout failed");
-    rc = pcap_set_buffer_size(pc, 125000 * read_timeout_ms);
-    if (rc != 0) die("pcap_set_buffer_size failed");
-    //
-    // Start capturing
-    //
-    rc = pcap_activate(pc);
-    if (rc != 0) {
-        fprintf(stderr, "pcap_activate returned %d. %s\n", rc, pcap_geterr(pc));
-        exit(1);
+        fprintf(stderr, "pcap_open_offline failed. %s\n", errbuf);
+        return false;
     }
-
-    puts("Capture source activated");
+    bool result = false;
     struct pcap_pkthdr* hdr = NULL;
     const u_char* data = NULL;
     unsigned long counter = 0;
     while(1) {
-        rc = pcap_next_ex(pc, &hdr, &data);
+        int rc = pcap_next_ex(pc, &hdr, &data);
         switch(rc) {
         case 1: // packet read
             ++counter;
@@ -140,22 +100,111 @@ int main(int argc, char const** argv) {
             print_captured_data(data, hdr->caplen);
             break;
         case 0: // timeout expired
+            // probably shouldn't get this when reading from a file.
+            fprintf(stderr, "Unexpected timeout returned from pcap_next_ex\n");
             break;
         case -1: // error occurred while reading packet
             fprintf(stderr, "Error occurred while reading packet. %s", pcap_geterr(pc));
-            exit(1);
             break;
         case -2: // no more packets in savefile. 
-            // Since we're live capturing from device, shouldn't hit this.
             puts("No more packets in savefile.");
-            break;
+            result = true;
+            goto end_loop;
         default:
             fprintf(stderr, "Unexpected pcap_next_ex return value %d\n", rc);
-            exit(1);
-            break;
+            goto end_loop;
         }
     } 
-
+end_loop:
     pcap_close(pc);
-    return 0;
+    return result;
 }
+
+static void
+publish_json(app_state const* state, char const* json_path) {
+    char* tmp_json_path = malloc
+}
+
+static int
+main_loop(char const* capture_path, char const* publish_path) {
+
+    int result = 1;
+
+    // printf("libpcap version: %s\n", pcap_lib_version());
+
+    // watch for new files in capture path, and process them when they're closed.
+
+    int inote_fd = inotify_init1(IN_CLOEXEC);
+    if (inote_fd == -1) {
+        perror("inotify_init1 failed");
+        return 1;
+    }
+
+    int watch1 = inotify_add_watch(inote_fd, capture_path, IN_CLOSE_WRITE);
+    if (watch1 == -1) {
+        perror("inotify_add_watch failed");
+        close(inote_fd);
+        return 1;
+    }
+
+    // declaration of buf from man (2) inotify
+    char buf[4096] __attribute__ ((aligned(__alignof__(struct inotify_event))));
+    app_state state;
+    memset(&state, 0, sizeof state);
+
+    while(1) {
+        ssize_t len = read(inote_fd, buf, sizeof(buf));
+        if (len < 0) {
+            perror("read failed.");
+            if (errno != EAGAIN && errno != EINTR) {
+                fprintf(stderr, "Non-recoverable read failure. %d\n", errno);
+                goto end;
+            }
+        }
+
+        struct inotify_event const* event = NULL;
+
+        for(char *ptr = buf; ptr < buf + len; ptr += sizeof(struct inotify_event) + event->len) {
+            event = (struct inotify_event*)ptr;
+
+            if (unlikely(event->wd != watch1)) {
+                // should not happen
+                fprintf(stderr, "Unexpected wd %d\n", event->wd);
+                goto end;
+            }
+
+            if (unlikely(!(event->mask & IN_CLOSE_WRITE))) {
+                fprintf(stderr, "Unexpected event mask: 0x%X\n", event->mask);
+                // this could happen if someone removes the directory we're watching.
+                // in that case exit.
+                goto end;
+            }
+
+            if (unlikely(event->len == 0)) {
+                // should not happen.
+                fprintf(stderr, "Unexpected event->len == 0\n");
+                goto end;
+            }
+
+            process_pcap_file(&state, event->name);
+            publish_json(&state, publish_path);
+        }
+    }
+
+end:
+    close(inote_fd);
+
+    return result;
+}
+
+int main(int argc, char const** argv) {
+    if (argc != 3) {
+        fprintf(stderr, "Missing required arguments.\nUsage: accumulator <capture_path> <publish_path>\n");
+        exit(1);
+    }
+
+    char const* capture_path = argv[1];
+    char const* publish_path = argv[2];
+    return main_loop(capture_path, publish_path);
+}
+

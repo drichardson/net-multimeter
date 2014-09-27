@@ -1,6 +1,6 @@
 OBJS=accumulator.o debug.o ethernet.o ipv4.o
 CC=gcc
-CFLAGS=-Wall -Werror -std=c11 -O3
+CFLAGS=-Wall -Werror -std=c11 -O3 -D_GNU_SOURCE
 
 accumulator: $(OBJS)
 	$(CC) -o $@ $^ -lpcap

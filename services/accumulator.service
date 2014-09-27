@@ -2,9 +2,9 @@
 Description=Network Multimeter Accumulator
 
 [Service]
-ExecStartPre=/usr/bin/mkdir -p /tmp/net-multimeter/capture
-ExecStartPre=/usr/bin/mkdir -p /tmp/net-multimeter/publish
-ExecStart=/usr/bin/accumulator /tmp/net-multimeter/capture /tmp/net-multimeter/publish
+User=http
+ExecStartPre=mkdir -p /tmp/publish
+ExecStart=/usr/bin/accumulator /tmp/capture /tmp/publish
 
 [Install]
 WantedBy=multi-user.target
