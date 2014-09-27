@@ -1,11 +1,14 @@
 #pragma once
 
+#include <stdbool.h>
+#include <stdio.h>
+
 // Handles writing to a temporary location (in the same folder as the intended
 // destination) and then atomically moving the file into the intended
 // destination on close.
 
 typedef struct transact_file {
-    int fd;
+    FILE* fp;
     char* dest;
     char* tmp;
 } transact_file;

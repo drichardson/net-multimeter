@@ -4,8 +4,10 @@
 #include "ipv4.h"
 #include "likely.h"
 #include "tcp.h"
+#include "transact_file.h"
 #include "udp.h"
 #include <errno.h>
+#include <limits.h>
 #include <pcap/pcap.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -122,15 +124,23 @@ end_loop:
 
 static void
 publish_json(app_state const* state, char const* json_path) {
-    char* tmp_json_path = malloc
+    transact_file tf;
+    if (!transact_file_open(&tf, json_path)) {
+        fprintf(stderr, "transact_file_open failed opening %s. %s", json_path, strerror(errno));
+        return;
+    }
+
+    fputs("{}", tf.fp);
+
+    if(!transact_file_close(&tf, true)) {
+        fprintf(stderr, "transact_file_open failed to commit and close %s. %s", json_path, strerror(errno));
+    }
 }
 
 static int
 main_loop(char const* capture_path, char const* publish_path) {
 
     int result = 1;
-
-    // printf("libpcap version: %s\n", pcap_lib_version());
 
     // watch for new files in capture path, and process them when they're closed.
 
@@ -186,7 +196,10 @@ main_loop(char const* capture_path, char const* publish_path) {
                 goto end;
             }
 
-            process_pcap_file(&state, event->name);
+            char pcap_file[PATH_MAX];
+            snprintf(pcap_file, sizeof pcap_file, "%s/%s", capture_path, event->name);
+
+            process_pcap_file(&state, pcap_file);
             publish_json(&state, publish_path);
         }
     }

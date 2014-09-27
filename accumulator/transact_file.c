@@ -1,6 +1,9 @@
 #include "transact_file.h"
 #include <fcntl.h>
 #include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
 
 bool transact_file_open(transact_file* tf, char const* path) {
     int path_len = strlen(path);
@@ -14,18 +17,26 @@ bool transact_file_open(transact_file* tf, char const* path) {
         return false;
     }
 
-    tf->fd = fd;
+    FILE* fp = fdopen(fd, "w");
+    if (fp == NULL) {
+        close(fd);
+        free(tmp);
+        return false;
+    }
+
+    tf->fp = fp;
     tf->tmp = tmp;
     tf->dest = strdup(path);
+
     return true;
 }
 
 bool transact_file_close(transact_file* tf, bool commit) {
     bool result = false;
-    int rc = close(tf->fd);
+    int rc = fclose(tf->fp);
     if (rc == 0) {
         if (commit) {
-            int rc = rename(tf->tmp, tf->dest);
+            rc = rename(tf->tmp, tf->dest);
             if (rc == 0) result = true;
         }
     }
