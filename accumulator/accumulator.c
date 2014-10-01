@@ -7,6 +7,7 @@
 #include "transact_file.h"
 #include "udp.h"
 #include <errno.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <pcap/pcap.h>
 #include <stdbool.h>
@@ -18,88 +19,121 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-typedef struct app_state {
+// TODO: May be fast on 32-bit devices to have a 32-bit version of these fields which
+// are used while processing a single pcap file which are then added at the end to
+// the 64-bit version of them.
+
+typedef struct {
+    u64 packets;
+    u64 payload_data; 
+    u64 total_data;
+} protocol_counts;
+
+typedef struct {
+    u64 errors;
+    protocol_counts ethernet;
+
+    // protocols transported by ethernet
+    struct {
+        protocol_counts ipv4;
+        protocol_counts ipv6;
+        protocol_counts arp;
+        protocol_counts other;
+    } over_ethernet;
+
+    // protocols transported by ipv4 and ipv6
+    struct {
+        protocol_counts icmpv4;
+        protocol_counts icmpv6;
+        protocol_counts tcp;
+        protocol_counts udp;
+        protocol_counts other;
+    } over_ip;
+} aggregate_counts;
+
+typedef struct {
+    aggregate_counts aggregates;
 } app_state;
 
+static void inline
+protocol_count_add_packet(protocol_counts* pc, u64 const payload_data, u64 const total_data) {
+    ++pc->packets;
+    pc->payload_data += payload_data;
+    pc->total_data += total_data;
+}
+
 static void
-print_captured_data(u8 const* data, int data_len) {
+ethernet_packet_process(app_state* state, u8 const* data, int data_len /* captured data */, int total_data_len) {
     if (data_len < sizeof(ethernet_frame)) {
-        printf("ppf: didn't capture enough to parse ethernet frame. len=%d\n", data_len);
+        fprintf(stderr, "ppf: didn't capture enough to parse ethernet frame. len=%d\n", data_len);
         return;
     }
 
     ethernet_frame const* e = (ethernet_frame*)data;
-    putchar('\t'); ethernet_frame_print(e); putchar('\n');
+
+    protocol_count_add_packet(&state->aggregates.ethernet,
+            total_data_len - sizeof(ethernet_frame),
+            total_data_len);
 
     u16 const ethertype = ethernet_frame_ethertype(e);
 
     if (ethertype == ETHERTYPE_IPV4) {
         if (data_len < sizeof(ethernet_frame) + sizeof(ipv4_packet)) {
-            printf("ppf: didn't capture enough to parse IPv4 header. len=%d\n", data_len);
+            fprintf(stderr, "ppf: didn't capture enough to parse IPv4 header. len=%d\n", data_len);
             return;
         }
         // IPv4
         ipv4_packet const* ip4 = (ipv4_packet*)(data + sizeof(ethernet_frame));
-        putchar('\t'); ipv4_packet_print(ip4); putchar('\n');
         
-        u8 const* payload = (((u8*)ip4)+ipv4_packet_ihl(ip4)*4);
-        putchar('\t');
+        u32 const ip_payload_len = ipv4_packet_ihl(ip4)*4;
+        // u8 const* ip_payload = (((u8*)ip4)+ip_payload_len);
+
+        protocol_count_add_packet(&state->aggregates.over_ethernet.ipv4,
+                ip_payload_len,
+                total_data_len - (sizeof(ethernet_frame) + sizeof(ipv4_packet))
+                );
 
         switch(ip4->protocol) {
         case IPV4_PROTOCOL_ICMP:
-            printf("ICMP");
-            break;
-        case IPV4_PROTOCOL_IGMP:
-            printf("IGMP");
+            protocol_count_add_packet(&state->aggregates.over_ip.icmpv4, 0, 0);
             break;
         case IPV4_PROTOCOL_TCP:
-            tcp_packet_print((tcp_packet*)payload);
+            protocol_count_add_packet(&state->aggregates.over_ip.tcp, 0, 0);
             break;
         case IPV4_PROTOCOL_UDP: 
-            udp_packet_print((udp_packet*)payload);
+            protocol_count_add_packet(&state->aggregates.over_ip.udp, 0, 0);
             break;
+        case IPV4_PROTOCOL_IGMP:
         case IPV4_PROTOCOL_ENCAP:
-            printf("ENCAP");
-            break;
         case IPV4_PROTOCOL_SCTP:
-            printf("SCTP");
-            break;
         default:
-            printf("Unknown IP protocol %hhu", ip4->protocol);
+            protocol_count_add_packet(&state->aggregates.over_ip.other, 0, 0);
             break;
         }
-        putchar('\n');
     } else if (ethertype == ETHERTYPE_IPV6) {
-        // IPv6
-        printf("\tIPv6\n");
+        protocol_count_add_packet(&state->aggregates.over_ethernet.ipv6, 0, 0);
     } else if (ethertype == ETHERTYPE_ARP) {
-        printf("\tARP\n");
+        protocol_count_add_packet(&state->aggregates.over_ethernet.arp, 0, 0);
     } else {
-        printf("\tUnhandled ethertype: %0xX\n", ethertype);
+        protocol_count_add_packet(&state->aggregates.over_ethernet.other, 0, 0);
     }
 }
 
-static bool
+static void 
 process_pcap_file(app_state* state, char const* filename) {
     char errbuf[PCAP_ERRBUF_SIZE];
     pcap_t* pc = pcap_open_offline(filename, errbuf);
     if (pc == NULL) {
         fprintf(stderr, "pcap_open_offline failed. %s\n", errbuf);
-        return false;
+        return;
     }
-    bool result = false;
     struct pcap_pkthdr* hdr = NULL;
     const u_char* data = NULL;
-    unsigned long counter = 0;
     while(1) {
         int rc = pcap_next_ex(pc, &hdr, &data);
         switch(rc) {
         case 1: // packet read
-            ++counter;
-            printf("packet %lu: caplen=%d, len=%d data=", counter, hdr->caplen, hdr->len);
-            print_hex_dump(data, min_int(hdr->caplen, 20));
-            puts("...");
-            print_captured_data(data, hdr->caplen);
+            ethernet_packet_process(state, data, hdr->caplen, hdr->len);
             break;
         case 0: // timeout expired
             // probably shouldn't get this when reading from a file.
@@ -107,10 +141,9 @@ process_pcap_file(app_state* state, char const* filename) {
             break;
         case -1: // error occurred while reading packet
             fprintf(stderr, "Error occurred while reading packet. %s", pcap_geterr(pc));
+            ++state->aggregates.errors;
             break;
         case -2: // no more packets in savefile. 
-            puts("No more packets in savefile.");
-            result = true;
             goto end_loop;
         default:
             fprintf(stderr, "Unexpected pcap_next_ex return value %d\n", rc);
@@ -119,7 +152,55 @@ process_pcap_file(app_state* state, char const* filename) {
     } 
 end_loop:
     pcap_close(pc);
-    return result;
+}
+
+
+static void publish_protocol_counts_named(FILE* fp,
+        char const* name,
+        protocol_counts const* pc) {
+    fprintf(fp,
+            "\"%s\":{\"packets\":%" PRIu64
+            ", \"payload_data\":%" PRIu64
+            ", \"total_data\":%" PRIu64 "}",
+            name, pc->packets, pc->payload_data, pc->total_data);
+}
+
+static void
+publish_json_fp(app_state const* state, FILE* fp) {
+#define put(x) fputs(x, fp)
+#define sep() fputs(",\n", fp)
+#define key(n) put("\"" n "\":")
+    put("{");
+    publish_protocol_counts_named(fp, "ethernet", &state->aggregates.ethernet);
+    sep();
+    key("over_ethernet");
+    {
+        put("{");
+        publish_protocol_counts_named(fp, "ipv4", &state->aggregates.over_ethernet.ipv4);
+        sep();
+        publish_protocol_counts_named(fp, "ipv6", &state->aggregates.over_ethernet.ipv6);
+        sep();
+        publish_protocol_counts_named(fp, "arp", &state->aggregates.over_ethernet.arp);
+        sep();
+        publish_protocol_counts_named(fp, "other", &state->aggregates.over_ethernet.other);
+        put("}");
+    }
+    sep();
+    key("over_ip");
+    {
+        put("{");
+        publish_protocol_counts_named(fp, "tcp", &state->aggregates.over_ip.tcp);
+        sep();
+        publish_protocol_counts_named(fp, "udp", &state->aggregates.over_ip.udp);
+        sep();
+        publish_protocol_counts_named(fp, "icmpv4", &state->aggregates.over_ip.icmpv4);
+        sep();
+        publish_protocol_counts_named(fp, "icmpv6", &state->aggregates.over_ip.icmpv6);
+        sep();
+        publish_protocol_counts_named(fp, "other", &state->aggregates.over_ip.other);
+        put("}");
+    }
+    put("}");
 }
 
 static void
@@ -130,13 +211,10 @@ publish_json(app_state const* state, char const* json_path) {
         return;
     }
 
-    static int count = 0;
-    fprintf(tf.fp, "{%d}", ++count);
+    publish_json_fp(state, tf.fp);
 
     if(!transact_file_close(&tf, true)) {
         fprintf(stderr, "transact_file_open failed to commit and close %s. %s", json_path, strerror(errno));
-    } else {
-        printf("published to %s\n", json_path);
     }
 }
 
