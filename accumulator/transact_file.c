@@ -7,7 +7,7 @@
 
 bool transact_file_open(transact_file* tf, char const* path) {
     int path_len = strlen(path);
-    char* tmp = malloc(path_len + 3);
+    char* tmp = malloc(path_len + 4);
     strcpy(tmp, path);
     strcpy(tmp+path_len, ".TX");
 

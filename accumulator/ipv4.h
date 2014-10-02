@@ -28,11 +28,11 @@ typedef struct ipv4_packet {
 
 #define IPV4_ADDRESS_STRING_LEN 15
 
-inline void ipv4_address_to_string(u8 const (*p)[4], char* buf, size_t buflen) {
-    snprintf(buf, buflen, "%hhu.%hhu.%hhu.%hhu", (*p)[0], (*p)[1], (*p)[2], (*p)[4]);
+static inline void ipv4_address_to_string(u8 const (*p)[4], char* buf, size_t buflen) {
+    snprintf(buf, buflen, "%hhu.%hhu.%hhu.%hhu", (*p)[0], (*p)[1], (*p)[2], (*p)[3]);
 }
 
-inline u8 ipv4_packet_ihl(ipv4_packet const* p) {
+static inline u8 ipv4_packet_ihl(ipv4_packet const* p) {
     return p->version_ihl & 0xf;
 }
 

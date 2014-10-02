@@ -2,7 +2,7 @@
 
 #include "types.h"
 
-inline void byte_to_2hex_chars(u8 b, char *p) {
+static inline void byte_to_2hex_chars(u8 b, char *p) {
     static char const nibble_to_char[16] ={
         '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
         'A', 'B', 'C', 'D', 'E', 'F'

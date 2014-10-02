@@ -19,7 +19,7 @@ if [ -z "$2" ]; then
 fi
 CAPTURE_DIR=$2
 
-ROTATE_SEC=5
+ROTATE_SEC=2
 SNARF_LEN=58
 
 /usr/bin/mkdir -p "$CAPTURE_DIR"

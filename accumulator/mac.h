@@ -5,7 +5,7 @@
 
 #define MAC_ADDRESS_STRING_LEN 17
 
-inline void
+static inline void
 mac_address_to_string(u8 const (*p)[6], char* buf, size_t buflen) { 
     byte_to_2hex_chars((*p)[0], buf);
     buf[2] = ':';

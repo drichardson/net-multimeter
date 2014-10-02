@@ -53,7 +53,7 @@ typedef struct ethernet_frame {
 #define ETHERTYPE_Q_I_Q 0x9100
 #define ETHERTYPE_VERITAS_LOW_LATENCY_TRANSPORT 0xCAFE
 
-inline u16 ethernet_frame_ethertype(ethernet_frame const* e) {
+static inline u16 ethernet_frame_ethertype(ethernet_frame const* e) {
     return u8s_to_u16(&e->ethertype);
 }
 

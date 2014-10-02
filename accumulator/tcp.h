@@ -13,7 +13,7 @@ typedef struct tcp_packet {
     u8 options[0]; // if data offset > 5
 } tcp_packet;
 
-inline void tcp_packet_print(tcp_packet const* tcp) {
+static inline void tcp_packet_print(tcp_packet const* tcp) {
     printf("TCP: src_port=%hu, dst_port=%hu", u8s_to_u16(&tcp->src_port),
             u8s_to_u16(&tcp->dst_port));
 }

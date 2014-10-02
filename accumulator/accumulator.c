@@ -6,10 +6,12 @@
 #include "tcp.h"
 #include "transact_file.h"
 #include "udp.h"
+#include <assert.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <limits.h>
 #include <pcap/pcap.h>
+#include <search.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,7 +54,30 @@ typedef struct {
 } aggregate_counts;
 
 typedef struct {
+    // constraint 1: low_address <= high_address
+    // constraint 2: low_address must immediately preceed high_address in memory.
+    u8 low_address[4];
+    u8 high_address[4];
+    protocol_counts low_originated;
+    protocol_counts high_originated;
+} ipv4_counter_pair;
+
+static int ipv4_counter_pair_compare(void const* n1, void const* n2) {
+    ipv4_counter_pair const* p1 = n1;
+    ipv4_counter_pair const* p2 = n2;
+
+    _Static_assert(offsetof(ipv4_counter_pair, high_address)
+            - offsetof(ipv4_counter_pair, low_address)
+            == sizeof(p1->low_address),
+            "high_address doesn't immediately follow low_address in structure layout");
+
+    return memcmp(p1->low_address, p2->low_address,
+            sizeof(p1->low_address)+sizeof(p1->high_address));
+}
+
+typedef struct {
     aggregate_counts aggregates;
+    void* ipv4_counter_pairs;
 } app_state;
 
 static void inline
@@ -85,13 +110,39 @@ ethernet_packet_process(app_state* state, u8 const* data, int data_len /* captur
         // IPv4
         ipv4_packet const* ip4 = (ipv4_packet*)(data + sizeof(ethernet_frame));
         
-        u32 const ip_payload_len = ipv4_packet_ihl(ip4)*4;
+        u32 const ip_header_len = ipv4_packet_ihl(ip4)*4;
+        u32 const ip_total_len = u8s_to_u16(&ip4->total_length);
+        u32 const ip_payload_len = ip_total_len - ip_header_len;
         // u8 const* ip_payload = (((u8*)ip4)+ip_payload_len);
 
         protocol_count_add_packet(&state->aggregates.over_ethernet.ipv4,
                 ip_payload_len,
-                total_data_len - (sizeof(ethernet_frame) + sizeof(ipv4_packet))
-                );
+                ip_total_len);
+
+        // Update the per-IPv4 address counters.
+        ipv4_counter_pair* new_pair = calloc(sizeof(ipv4_counter_pair), 1);
+        enum originator { o_src_low, o_src_high } originator;
+        if (memcmp(ip4->src_ip_address, ip4->dst_ip_address, 4) <= 0) {
+            memcpy(new_pair->low_address, ip4->src_ip_address, 4);
+            memcpy(new_pair->high_address, ip4->dst_ip_address, 4);
+            originator = o_src_low;
+        } else {
+            memcpy(new_pair->low_address, ip4->dst_ip_address, 4);
+            memcpy(new_pair->high_address, ip4->src_ip_address, 4);
+            originator = o_src_high;
+        }
+
+        ipv4_counter_pair** ppair = tsearch(new_pair, &state->ipv4_counter_pairs, ipv4_counter_pair_compare);
+        ipv4_counter_pair *pair = *ppair;
+        if (pair != new_pair) {
+            // TODO: reuse instead of constantly mallocing and freeing just because the address exists
+            // already.
+            free(new_pair);
+        }
+        assert(pair);
+        protocol_counts* originator_counts = originator == o_src_low ? &pair->low_originated : &pair->high_originated;
+
+        protocol_count_add_packet(originator_counts, ip_payload_len, ip_total_len);
 
         switch(ip4->protocol) {
         case IPV4_PROTOCOL_ICMP:
@@ -165,17 +216,55 @@ static void publish_protocol_counts_named(FILE* fp,
             name, pc->packets, pc->payload_data, pc->total_data);
 }
 
+_Thread_local bool tl_publish_first;
+_Thread_local FILE* tl_publish_fp;
+
+#define put(x) fputs(x, tl_publish_fp)
+#define sep() fputs(",\n", tl_publish_fp)
+#define key(n) put("\"" n "\":")
+#define quote(s) { put("\""); put(s); put("\""); }
+
+static void
+ipv4_counter_pair_json_publish_action(const void *nodep,
+        const VISIT which,
+        const int depth) {
+
+    if (which != postorder && which != leaf) {
+        return;
+    }
+
+    ipv4_counter_pair const* const* ppair = nodep;
+    ipv4_counter_pair const* pair = *ppair;
+    {
+        if (tl_publish_first) {
+            tl_publish_first = false;
+        } else {
+            sep();
+        }
+        put("{\n");
+        char s[16];
+        ipv4_address_to_string(&pair->low_address, s, sizeof s);
+        key("low-address"); quote(s);
+        sep();
+        ipv4_address_to_string(&pair->high_address, s, sizeof s);
+        key("high-address"); quote(s);
+        sep();
+        publish_protocol_counts_named(tl_publish_fp, "low-counts", &pair->low_originated);
+        sep();
+        publish_protocol_counts_named(tl_publish_fp, "high-counts", &pair->low_originated);
+        put("}");
+    }
+}
+
 static void
 publish_json_fp(app_state const* state, FILE* fp) {
-#define put(x) fputs(x, fp)
-#define sep() fputs(",\n", fp)
-#define key(n) put("\"" n "\":")
-    put("{");
+    tl_publish_fp = fp;
+    put("{\n");
     publish_protocol_counts_named(fp, "ethernet", &state->aggregates.ethernet);
     sep();
     key("over_ethernet");
     {
-        put("{");
+        put("{\n");
         publish_protocol_counts_named(fp, "ipv4", &state->aggregates.over_ethernet.ipv4);
         sep();
         publish_protocol_counts_named(fp, "ipv6", &state->aggregates.over_ethernet.ipv6);
@@ -188,7 +277,7 @@ publish_json_fp(app_state const* state, FILE* fp) {
     sep();
     key("over_ip");
     {
-        put("{");
+        put("{\n");
         publish_protocol_counts_named(fp, "tcp", &state->aggregates.over_ip.tcp);
         sep();
         publish_protocol_counts_named(fp, "udp", &state->aggregates.over_ip.udp);
@@ -200,21 +289,31 @@ publish_json_fp(app_state const* state, FILE* fp) {
         publish_protocol_counts_named(fp, "other", &state->aggregates.over_ip.other);
         put("}");
     }
+    sep();
+    key("over_ip_by_address_pair");
+    {
+        put("[\n");
+        tl_publish_first = true;
+        twalk(state->ipv4_counter_pairs, ipv4_counter_pair_json_publish_action);
+        put("\n]");
+    }
     put("}");
+
+    tl_publish_fp = NULL;
 }
 
 static void
 publish_json(app_state const* state, char const* json_path) {
     transact_file tf;
     if (!transact_file_open(&tf, json_path)) {
-        fprintf(stderr, "transact_file_open failed opening %s. %s", json_path, strerror(errno));
+        fprintf(stderr, "transact_file_open failed opening %s. %s\n", json_path, strerror(errno));
         return;
     }
 
     publish_json_fp(state, tf.fp);
 
     if(!transact_file_close(&tf, true)) {
-        fprintf(stderr, "transact_file_open failed to commit and close %s. %s", json_path, strerror(errno));
+        fprintf(stderr, "transact_file_open failed to commit and close %s. %s\n", json_path, strerror(errno));
     }
 }
 
