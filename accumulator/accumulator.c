@@ -3,6 +3,7 @@
 #include "ethernet.h"
 #include "ipv4.h"
 #include "likely.h"
+#include "mac.h"
 #include "tcp.h"
 #include "transact_file.h"
 #include "udp.h"
@@ -31,61 +32,154 @@ typedef struct {
     u64 total_data;
 } protocol_counts;
 
-typedef struct {
-    u64 errors;
-    protocol_counts ethernet;
-
-    // protocols transported by ethernet
-    struct {
-        protocol_counts ipv4;
-        protocol_counts ipv6;
-        protocol_counts arp;
-        protocol_counts other;
-    } over_ethernet;
-
-    // protocols transported by ipv4 and ipv6
-    struct {
-        protocol_counts icmpv4;
-        protocol_counts icmpv6;
-        protocol_counts tcp;
-        protocol_counts udp;
-        protocol_counts other;
-    } over_ip;
-} aggregate_counts;
-
-typedef struct {
-    // constraint 1: low_address <= high_address
-    // constraint 2: low_address must immediately preceed high_address in memory.
-    u8 low_address[4];
-    u8 high_address[4];
-    protocol_counts low_originated;
-    protocol_counts high_originated;
-} ipv4_counter_pair;
-
-static int ipv4_counter_pair_compare(void const* n1, void const* n2) {
-    ipv4_counter_pair const* p1 = n1;
-    ipv4_counter_pair const* p2 = n2;
-
-    _Static_assert(offsetof(ipv4_counter_pair, high_address)
-            - offsetof(ipv4_counter_pair, low_address)
-            == sizeof(p1->low_address),
-            "high_address doesn't immediately follow low_address in structure layout");
-
-    return memcmp(p1->low_address, p2->low_address,
-            sizeof(p1->low_address)+sizeof(p1->high_address));
-}
-
-typedef struct {
-    aggregate_counts aggregates;
-    void* ipv4_counter_pairs;
-} app_state;
-
 static void inline
 protocol_count_add_packet(protocol_counts* pc, u64 const payload_data, u64 const total_data) {
     ++pc->packets;
     pc->payload_data += payload_data;
     pc->total_data += total_data;
 }
+
+typedef struct {
+    u64 errors;
+    protocol_counts ethernet;
+
+    // protocols transported by ethernet
+    protocol_counts ipv4;
+    protocol_counts ipv6;
+    protocol_counts arp;
+    protocol_counts other_over_ethernet;
+
+    // protocols transported by ipv4 and ipv6
+    protocol_counts icmpv4;
+    protocol_counts icmpv6;
+    protocol_counts tcp;
+    protocol_counts udp;
+    protocol_counts other_over_ip;
+
+} aggregate_counts;
+
+#define define_address_pair_counter_struct(name, addrlen)  \
+typedef struct { \
+    u8 low_address[addrlen]; \
+    u8 high_address[addrlen]; \
+    protocol_counts low_originated; \
+    protocol_counts high_originated; \
+} name;
+
+// create a tsearch compatible compare function named <type>_compare
+// subject to constraints on address pair nodes (low first, then high)
+#define make_counter_pair_compare(type) \
+static int type ## _compare (void const* n1, void const* n2) { \
+    type const* p1 = n1; \
+    type const* p2 = n2; \
+    return memcmp(p1->low_address, p2->low_address, \
+            sizeof(p1->low_address)+sizeof(p1->high_address)); \
+}
+
+enum originator { o_src_low, o_src_high };
+
+#define make_counter_pair_alloc(type, addrlen) \
+static type * type ## _alloc (u8 const (*src)[addrlen], u8 const (*dst)[addrlen], enum originator * originator_out) { \
+    type * new_pair = calloc(sizeof(type), 1); \
+    if (memcmp(*src, *dst, addrlen) <= 0) { \
+        memcpy(new_pair->low_address, src, addrlen); \
+        memcpy(new_pair->high_address, dst, addrlen); \
+        *originator_out = o_src_low; \
+    } else { \
+        memcpy(new_pair->low_address, dst, addrlen); \
+        memcpy(new_pair->high_address, src, addrlen); \
+        *originator_out = o_src_high; \
+    } \
+    return new_pair; \
+}
+
+#define make_address_pair_add_packet(type, addrlen) \
+static void type ## _add_packet(void** root, u8 const (*src)[addrlen], u8 const (*dst)[addrlen], u64 payload_len, u64 total_len) { \
+    enum originator originator; \
+    type* new_pair = type ## _alloc(src, dst, &originator); \
+    /* TODO: Unbounded memory growth. Prune the tree using LRU. */ \
+    type ** ppair = tsearch(new_pair, root, type ## _compare); \
+    type *pair = *ppair; \
+    if (pair != new_pair) { \
+        /* TODO: reuse instead of constantly mallocing and freeing just because the address exists
+         already. */ \
+        free(new_pair); \
+    } \
+    assert(pair); \
+    protocol_counts* originator_counts = originator == o_src_low ? &pair->low_originated : &pair->high_originated; \
+    protocol_count_add_packet(originator_counts, payload_len, total_len); \
+}
+
+_Thread_local bool tl_publish_first;
+_Thread_local FILE* tl_publish_fp;
+
+#define put(x) fputs(x, tl_publish_fp)
+#define sep() fputs(",\n", tl_publish_fp)
+#define key(n) put("\"" n "\":")
+#define quote(s) { put("\""); put(s); put("\""); }
+
+static void
+publish_protocol_counts_named(
+        FILE* fp,
+        char const* name,
+        protocol_counts const* pc) {
+    fprintf(fp,
+            "\"%s\":{\"packets\":%" PRIu64
+            ", \"payload_data\":%" PRIu64
+            ", \"total_data\":%" PRIu64 "}",
+            name, pc->packets, pc->payload_data, pc->total_data);
+}
+
+#define make_address_pair_json_publish_action(type, addrlen, addr_to_string_conv) \
+static void \
+type ## _json_publish_action(const void *nodep, \
+        const VISIT which, \
+        const int depth) { \
+\
+    if (which != postorder && which != leaf) { \
+        return; \
+    } \
+\
+    type const* const* ppair = nodep; \
+    type const* pair = *ppair; \
+    { \
+        if (tl_publish_first) { \
+            tl_publish_first = false; \
+        } else { \
+            sep(); \
+        } \
+        put("{\n"); \
+        char s[100]; \
+        addr_to_string_conv(&pair->low_address, s, sizeof s); \
+        key("low-address"); quote(s); \
+        sep(); \
+        addr_to_string_conv(&pair->high_address, s, sizeof s); \
+        key("high-address"); quote(s); \
+        sep(); \
+        publish_protocol_counts_named(tl_publish_fp, "low-counts", &pair->low_originated); \
+        sep(); \
+        publish_protocol_counts_named(tl_publish_fp, "high-counts", &pair->low_originated); \
+        put("}"); \
+    } \
+} \
+
+#define define_address_pair_counter(name, addrlen, addr_to_string_conv) \
+    define_address_pair_counter_struct(name, addrlen) \
+    make_counter_pair_compare(name) \
+    make_counter_pair_alloc(name, addrlen) \
+    make_address_pair_add_packet(name, addrlen) \
+    make_address_pair_json_publish_action(name, addr, addr_to_string_conv)
+
+
+
+define_address_pair_counter(ipv4_counter_pair, 4, ipv4_address_to_string);
+define_address_pair_counter(ethernet_counter_pair, 6, mac_address_to_string);
+
+typedef struct {
+    aggregate_counts aggregates;
+    void* ethernet_counter_pairs;
+    void* ipv4_counter_pairs;
+} app_state;
 
 static void
 ethernet_packet_process(app_state* state, u8 const* data, int data_len /* captured data */, int total_data_len) {
@@ -95,9 +189,17 @@ ethernet_packet_process(app_state* state, u8 const* data, int data_len /* captur
     }
 
     ethernet_frame const* e = (ethernet_frame*)data;
+    u64 const ethernet_payload_len = total_data_len - sizeof(ethernet_frame);
 
     protocol_count_add_packet(&state->aggregates.ethernet,
-            total_data_len - sizeof(ethernet_frame),
+            ethernet_payload_len,
+            total_data_len);
+
+    ethernet_counter_pair_add_packet(
+            &state->ethernet_counter_pairs,
+            &e->src_mac_address,
+            &e->dst_mac_address,
+            ethernet_payload_len,
             total_data_len);
 
     u16 const ethertype = ethernet_frame_ethertype(e);
@@ -115,58 +217,40 @@ ethernet_packet_process(app_state* state, u8 const* data, int data_len /* captur
         u32 const ip_payload_len = ip_total_len - ip_header_len;
         // u8 const* ip_payload = (((u8*)ip4)+ip_payload_len);
 
-        protocol_count_add_packet(&state->aggregates.over_ethernet.ipv4,
+        protocol_count_add_packet(&state->aggregates.ipv4,
                 ip_payload_len,
                 ip_total_len);
 
-        // Update the per-IPv4 address counters.
-        ipv4_counter_pair* new_pair = calloc(sizeof(ipv4_counter_pair), 1);
-        enum originator { o_src_low, o_src_high } originator;
-        if (memcmp(ip4->src_ip_address, ip4->dst_ip_address, 4) <= 0) {
-            memcpy(new_pair->low_address, ip4->src_ip_address, 4);
-            memcpy(new_pair->high_address, ip4->dst_ip_address, 4);
-            originator = o_src_low;
-        } else {
-            memcpy(new_pair->low_address, ip4->dst_ip_address, 4);
-            memcpy(new_pair->high_address, ip4->src_ip_address, 4);
-            originator = o_src_high;
-        }
-
-        ipv4_counter_pair** ppair = tsearch(new_pair, &state->ipv4_counter_pairs, ipv4_counter_pair_compare);
-        ipv4_counter_pair *pair = *ppair;
-        if (pair != new_pair) {
-            // TODO: reuse instead of constantly mallocing and freeing just because the address exists
-            // already.
-            free(new_pair);
-        }
-        assert(pair);
-        protocol_counts* originator_counts = originator == o_src_low ? &pair->low_originated : &pair->high_originated;
-
-        protocol_count_add_packet(originator_counts, ip_payload_len, ip_total_len);
+        ipv4_counter_pair_add_packet(
+                &state->ipv4_counter_pairs,
+                &ip4->src_ip_address,
+                &ip4->dst_ip_address, 
+                ip_payload_len,
+                ip_total_len);
 
         switch(ip4->protocol) {
         case IPV4_PROTOCOL_ICMP:
-            protocol_count_add_packet(&state->aggregates.over_ip.icmpv4, 0, 0);
+            protocol_count_add_packet(&state->aggregates.icmpv4, 0, 0);
             break;
         case IPV4_PROTOCOL_TCP:
-            protocol_count_add_packet(&state->aggregates.over_ip.tcp, 0, 0);
+            protocol_count_add_packet(&state->aggregates.tcp, 0, 0);
             break;
         case IPV4_PROTOCOL_UDP: 
-            protocol_count_add_packet(&state->aggregates.over_ip.udp, 0, 0);
+            protocol_count_add_packet(&state->aggregates.udp, 0, 0);
             break;
         case IPV4_PROTOCOL_IGMP:
         case IPV4_PROTOCOL_ENCAP:
         case IPV4_PROTOCOL_SCTP:
         default:
-            protocol_count_add_packet(&state->aggregates.over_ip.other, 0, 0);
+            protocol_count_add_packet(&state->aggregates.other_over_ip, 0, 0);
             break;
         }
     } else if (ethertype == ETHERTYPE_IPV6) {
-        protocol_count_add_packet(&state->aggregates.over_ethernet.ipv6, 0, 0);
+        protocol_count_add_packet(&state->aggregates.ipv6, 0, 0);
     } else if (ethertype == ETHERTYPE_ARP) {
-        protocol_count_add_packet(&state->aggregates.over_ethernet.arp, 0, 0);
+        protocol_count_add_packet(&state->aggregates.arp, 0, 0);
     } else {
-        protocol_count_add_packet(&state->aggregates.over_ethernet.other, 0, 0);
+        protocol_count_add_packet(&state->aggregates.other_over_ethernet, 0, 0);
     }
 }
 
@@ -205,96 +289,56 @@ end_loop:
     pcap_close(pc);
 }
 
+#define publish_aggregate_counts_with_key(field, key) \
+    publish_protocol_counts_named(tl_publish_fp, key, &state->aggregates.field)
 
-static void publish_protocol_counts_named(FILE* fp,
-        char const* name,
-        protocol_counts const* pc) {
-    fprintf(fp,
-            "\"%s\":{\"packets\":%" PRIu64
-            ", \"payload_data\":%" PRIu64
-            ", \"total_data\":%" PRIu64 "}",
-            name, pc->packets, pc->payload_data, pc->total_data);
-}
-
-_Thread_local bool tl_publish_first;
-_Thread_local FILE* tl_publish_fp;
-
-#define put(x) fputs(x, tl_publish_fp)
-#define sep() fputs(",\n", tl_publish_fp)
-#define key(n) put("\"" n "\":")
-#define quote(s) { put("\""); put(s); put("\""); }
-
-static void
-ipv4_counter_pair_json_publish_action(const void *nodep,
-        const VISIT which,
-        const int depth) {
-
-    if (which != postorder && which != leaf) {
-        return;
-    }
-
-    ipv4_counter_pair const* const* ppair = nodep;
-    ipv4_counter_pair const* pair = *ppair;
-    {
-        if (tl_publish_first) {
-            tl_publish_first = false;
-        } else {
-            sep();
-        }
-        put("{\n");
-        char s[16];
-        ipv4_address_to_string(&pair->low_address, s, sizeof s);
-        key("low-address"); quote(s);
-        sep();
-        ipv4_address_to_string(&pair->high_address, s, sizeof s);
-        key("high-address"); quote(s);
-        sep();
-        publish_protocol_counts_named(tl_publish_fp, "low-counts", &pair->low_originated);
-        sep();
-        publish_protocol_counts_named(tl_publish_fp, "high-counts", &pair->low_originated);
-        put("}");
-    }
-}
+#define publish_aggregate_counts(field) \
+    publish_aggregate_counts_with_key(field, #field)
 
 static void
 publish_json_fp(app_state const* state, FILE* fp) {
     tl_publish_fp = fp;
     put("{\n");
-    publish_protocol_counts_named(fp, "ethernet", &state->aggregates.ethernet);
+    publish_aggregate_counts(ethernet);
     sep();
     key("over_ethernet");
     {
         put("{\n");
-        publish_protocol_counts_named(fp, "ipv4", &state->aggregates.over_ethernet.ipv4);
+        publish_aggregate_counts(ipv4);
         sep();
-        publish_protocol_counts_named(fp, "ipv6", &state->aggregates.over_ethernet.ipv6);
+        publish_aggregate_counts(ipv6);
         sep();
-        publish_protocol_counts_named(fp, "arp", &state->aggregates.over_ethernet.arp);
+        publish_aggregate_counts(arp);
         sep();
-        publish_protocol_counts_named(fp, "other", &state->aggregates.over_ethernet.other);
-        put("}");
+        publish_aggregate_counts_with_key(other_over_ethernet, "other");
+        put("},\n");
     }
-    sep();
     key("over_ip");
     {
         put("{\n");
-        publish_protocol_counts_named(fp, "tcp", &state->aggregates.over_ip.tcp);
+        publish_aggregate_counts(tcp);
         sep();
-        publish_protocol_counts_named(fp, "udp", &state->aggregates.over_ip.udp);
+        publish_aggregate_counts(udp);
         sep();
-        publish_protocol_counts_named(fp, "icmpv4", &state->aggregates.over_ip.icmpv4);
+        publish_aggregate_counts(icmpv4);
         sep();
-        publish_protocol_counts_named(fp, "icmpv6", &state->aggregates.over_ip.icmpv6);
+        publish_aggregate_counts(icmpv6);
         sep();
-        publish_protocol_counts_named(fp, "other", &state->aggregates.over_ip.other);
-        put("}");
+        publish_aggregate_counts_with_key(other_over_ip, "other");
+        put("}\n,");
     }
-    sep();
     key("over_ip_by_address_pair");
     {
         put("[\n");
         tl_publish_first = true;
         twalk(state->ipv4_counter_pairs, ipv4_counter_pair_json_publish_action);
+        put("\n],\n");
+    }
+    key("over_ethernet_by_address_pair");
+    {
+        put("[\n");
+        tl_publish_first = true;
+        twalk(state->ethernet_counter_pairs, ethernet_counter_pair_json_publish_action);
         put("\n]");
     }
     put("}");

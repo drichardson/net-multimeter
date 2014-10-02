@@ -18,5 +18,6 @@ mac_address_to_string(u8 const (*p)[6], char* buf, size_t buflen) {
     byte_to_2hex_chars((*p)[4], buf+12);
     buf[14] = ':';
     byte_to_2hex_chars((*p)[5], buf+15);
+    buf[16] = 0;
 }
 
