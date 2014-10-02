@@ -41,7 +41,6 @@ protocol_count_add_packet(protocol_counts* pc, u64 const payload_data, u64 const
 
 typedef struct {
     u64 errors;
-    protocol_counts ethernet;
 
     // protocols transported by ethernet
     protocol_counts ipv4;
@@ -184,16 +183,13 @@ typedef struct {
 static void
 ethernet_packet_process(app_state* state, u8 const* data, int data_len /* captured data */, int total_data_len) {
     if (data_len < sizeof(ethernet_frame)) {
+        ++state->aggregates.errors;
         fprintf(stderr, "ppf: didn't capture enough to parse ethernet frame. len=%d\n", data_len);
         return;
     }
 
     ethernet_frame const* e = (ethernet_frame*)data;
     u64 const ethernet_payload_len = total_data_len - sizeof(ethernet_frame);
-
-    protocol_count_add_packet(&state->aggregates.ethernet,
-            ethernet_payload_len,
-            total_data_len);
 
     ethernet_counter_pair_add_packet(
             &state->ethernet_counter_pairs,
@@ -206,6 +202,7 @@ ethernet_packet_process(app_state* state, u8 const* data, int data_len /* captur
 
     if (ethertype == ETHERTYPE_IPV4) {
         if (data_len < sizeof(ethernet_frame) + sizeof(ipv4_packet)) {
+            ++state->aggregates.errors;
             fprintf(stderr, "ppf: didn't capture enough to parse IPv4 header. len=%d\n", data_len);
             return;
         }
@@ -299,9 +296,9 @@ static void
 publish_json_fp(app_state const* state, FILE* fp) {
     tl_publish_fp = fp;
     put("{\n");
-    publish_aggregate_counts(ethernet);
+    key("accumulator_errors"); fprintf(fp, "%" PRIu64, state->aggregates.errors);
     sep();
-    key("over_ethernet");
+    key("ethernet_by_type");
     {
         put("{\n");
         publish_aggregate_counts(ipv4);
@@ -313,7 +310,7 @@ publish_json_fp(app_state const* state, FILE* fp) {
         publish_aggregate_counts_with_key(other_over_ethernet, "other");
         put("},\n");
     }
-    key("over_ip");
+    key("ip_by_type");
     {
         put("{\n");
         publish_aggregate_counts(tcp);
@@ -327,14 +324,14 @@ publish_json_fp(app_state const* state, FILE* fp) {
         publish_aggregate_counts_with_key(other_over_ip, "other");
         put("}\n,");
     }
-    key("over_ip_by_address_pair");
+    key("ip_by_address_pair");
     {
         put("[\n");
         tl_publish_first = true;
         twalk(state->ipv4_counter_pairs, ipv4_counter_pair_json_publish_action);
         put("\n],\n");
     }
-    key("over_ethernet_by_address_pair");
+    key("ethernet_by_address_pair");
     {
         put("[\n");
         tl_publish_first = true;
