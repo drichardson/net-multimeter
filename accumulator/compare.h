@@ -1,6 +1,12 @@
 #pragma once
 
-inline int min_int(int a, int b) {
-    return a < b ? a : b;
-}
+#define max(a,b) \
+    ({ typeof (a) _a = (a); \
+     typeof (b) _b = (b); \
+     _a > _b ? _a : _b; })
+
+#define min(a,b) \
+    ({ typeof (a) _a = (a); \
+     typeof (b) _b = (b); \
+     _a < _b ? _a : _b; })
 
