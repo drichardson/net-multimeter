@@ -45,7 +45,7 @@ fi
 #
 # Capture packets using tcpdump. Move rotated pcap files to process_dir.
 #
-ROTATE_SEC=2
+ROTATE_SEC=1
 SNARF_LEN=58
 
 # If the accumulator isn't keeping up with the captured files, the process

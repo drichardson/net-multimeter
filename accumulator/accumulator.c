@@ -8,7 +8,9 @@
 #include "transact_file.h"
 #include "udp.h"
 #include <assert.h>
+#include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <limits.h>
 #include <pcap/pcap.h>
@@ -178,6 +180,9 @@ typedef struct {
     aggregate_counts aggregates;
     void* ethernet_counter_pairs;
     void* ipv4_counter_pairs;
+
+    // caches
+    struct dirent *dent_cache;
 } app_state;
 
 static void
@@ -251,14 +256,9 @@ ethernet_packet_process(app_state* state, u8 const* data, int data_len /* captur
     }
 }
 
-static void 
-process_pcap_file(app_state* state, char const* filename) {
-    char errbuf[PCAP_ERRBUF_SIZE];
-    pcap_t* pc = pcap_open_offline(filename, errbuf);
-    if (pc == NULL) {
-        fprintf(stderr, "pcap_open_offline failed. %s\n", errbuf);
-        return;
-    }
+static bool
+process_pcap(app_state* state, pcap_t* pc) {
+    bool result = false;
     struct pcap_pkthdr* hdr = NULL;
     const u_char* data = NULL;
     while(1) {
@@ -276,6 +276,7 @@ process_pcap_file(app_state* state, char const* filename) {
             ++state->aggregates.errors;
             break;
         case -2: // no more packets in savefile. 
+            result = true;
             goto end_loop;
         default:
             fprintf(stderr, "Unexpected pcap_next_ex return value %d\n", rc);
@@ -283,7 +284,7 @@ process_pcap_file(app_state* state, char const* filename) {
         }
     } 
 end_loop:
-    pcap_close(pc);
+    return result;
 }
 
 #define publish_aggregate_counts_with_key(field, key) \
@@ -343,23 +344,135 @@ publish_json_fp(app_state const* state, FILE* fp) {
     tl_publish_fp = NULL;
 }
 
-static void
+static bool
 publish_json(app_state const* state, char const* json_path) {
     transact_file tf;
     if (!transact_file_open(&tf, json_path)) {
         fprintf(stderr, "transact_file_open failed opening %s. %s\n", json_path, strerror(errno));
-        return;
+        return false;
     }
 
     publish_json_fp(state, tf.fp);
 
     if(!transact_file_close(&tf, true)) {
         fprintf(stderr, "transact_file_open failed to commit and close %s. %s\n", json_path, strerror(errno));
+        return false;
     }
+
+    return true;
+}
+
+static bool
+process_files_in_dir(app_state* state, char const* dirpath) {
+    DIR* dp = opendir(dirpath);
+    if (dp == NULL) {
+        perror("Couldn't open process directory");
+        return false;
+    }
+
+    int dir_fd = dirfd(dp);
+    if (dir_fd == -1) {
+        closedir(dp);
+        perror("Couldn't get descriptor for directory.");
+        return false;
+    }
+
+    if (state->dent_cache == NULL) {
+        int name_max = pathconf(dirpath, _PC_NAME_MAX);
+        errno = 0; // clear, so we can tell if pathconf == -1 means unlimited or erro
+        if (name_max == -1) {
+            if (errno) {
+                perror("pathconf failed");
+            } else {
+                // no limit. This is kind of weird for a file system, so print a warning message.
+                name_max = 4000;
+                fprintf(stderr, "WARNING: file system says it has no limit on \
+                        names. I need a limit so using %d\n", name_max); }
+        }
+        int len = offsetof(struct dirent, d_name) + name_max + 1;
+        state->dent_cache = malloc(len);
+    }
+
+    bool result = false;
+
+    struct dirent* ent;
+    int rd_rc, rc;
+    while((rd_rc = readdir_r(dp, state->dent_cache, &ent)) == 0) {
+        if (ent == NULL) {
+            // end of stream reached
+            result = true;
+            break;
+        }
+        if (unlikely(ent->d_type == DT_UNKNOWN)) {
+            fprintf(stderr, "File system doesn't support d_type. Aborting.");
+            break;
+        }
+        if (ent->d_type == DT_DIR) {
+            continue;
+        }
+        if (strstr(ent->d_name, "pcap") == NULL) {
+            // safety check. Skip any files that don't have pcap in the name
+            fprintf(stderr, "WARNING: skipping file that doesn't look like I'm \
+                    supposed to delete '%s'.\n", ent->d_name); continue;
+        }
+        printf("Processing %s\n", ent->d_name);
+        int pcap_fd = openat(dir_fd, ent->d_name, O_RDONLY | O_CLOEXEC);
+
+        // After possible openat succeeds, unlink the file before doing
+        // anything else.  This prevents us from stuck in a loop because of a
+        // file we choke on time and time again.
+        rc = unlinkat(dir_fd, ent->d_name, 0);
+        if (rc == -1) {
+            if (pcap_fd != -1) {
+                close(pcap_fd);
+            }
+            fprintf(stderr, "Error unlinking %s. %s\n", ent->d_name, strerror(errno));
+            break;
+        }
+
+        if (pcap_fd == -1) {
+            fprintf(stderr, "Error opening file %s. %s\n", ent->d_name, strerror(errno));
+            break;
+        }
+        FILE* fp = fdopen(pcap_fd, "r");
+        if (fp == NULL) {
+            close(pcap_fd);
+            fprintf(stderr, "Error opening file pointer for %s. %s\n", ent->d_name, strerror(errno));
+            break;
+        }
+
+        char errbuf[PCAP_ERRBUF_SIZE];
+        pcap_t* pc = pcap_fopen_offline(fp, errbuf);
+        if (pc == NULL) {
+            fclose(fp);
+            fprintf(stderr, "pcap_fopen_offline failed for %s. %s\n", ent->d_name, errbuf);
+            break;
+        }
+
+        bool ok = process_pcap(state, pc);
+        pcap_close(pc); // also closes fp
+
+        if (!ok) {
+            break;
+        }
+    }
+
+    if (rd_rc != 0) {
+        fprintf(stderr, "readdir_r returned error %d: %s\n", rc, strerror(rc));
+        result = false;
+    }
+
+    rc = closedir(dp);
+    if (rc == -1) {
+        perror("Couldn't close process directory.");
+        result = false;
+    }
+
+    return result;
 }
 
 static int
-main_loop(char const* capture_path, char const* publish_path) {
+main_loop(char const* process_path, char const* publish_path) {
 
     int result = 1;
 
@@ -371,7 +484,7 @@ main_loop(char const* capture_path, char const* publish_path) {
         return 1;
     }
 
-    int watch1 = inotify_add_watch(inote_fd, capture_path, IN_CLOSE_WRITE);
+    int watch1 = inotify_add_watch(inote_fd, process_path, IN_MOVED_TO);
     if (watch1 == -1) {
         perror("inotify_add_watch failed");
         close(inote_fd);
@@ -384,6 +497,15 @@ main_loop(char const* capture_path, char const* publish_path) {
     memset(&state, 0, sizeof state);
 
     while(1) {
+        bool ok = process_files_in_dir(&state, process_path);
+        if (!ok) {
+            goto end;
+        }
+        ok = publish_json(&state, publish_path);
+        if (!ok) {
+            goto end;
+        }
+
         ssize_t len = read(inote_fd, buf, sizeof(buf));
         if (len < 0) {
             perror("read failed.");
@@ -404,7 +526,7 @@ main_loop(char const* capture_path, char const* publish_path) {
                 goto end;
             }
 
-            if (unlikely(!(event->mask & IN_CLOSE_WRITE))) {
+            if (unlikely(!(event->mask & IN_MOVED_TO))) {
                 fprintf(stderr, "Unexpected event mask: 0x%X\n", event->mask);
                 // this could happen if someone removes the directory we're watching.
                 // in that case exit.
@@ -415,13 +537,7 @@ main_loop(char const* capture_path, char const* publish_path) {
                 // should not happen.
                 fprintf(stderr, "Unexpected event->len == 0\n");
                 goto end;
-            }
-
-            char pcap_file[PATH_MAX];
-            snprintf(pcap_file, sizeof pcap_file, "%s/%s", capture_path, event->name);
-
-            process_pcap_file(&state, pcap_file);
-            publish_json(&state, publish_path);
+            } 
         }
     }
 
@@ -433,12 +549,12 @@ end:
 
 int main(int argc, char const** argv) {
     if (argc != 3) {
-        fprintf(stderr, "Missing required arguments.\nUsage: accumulator <capture_path> <publish_path>\n");
+        fprintf(stderr, "Missing required arguments.\nUsage: accumulator <process_path> <publish_path>\n");
         exit(1);
     }
 
-    char const* capture_path = argv[1];
+    char const* process_path = argv[1];
     char const* publish_path = argv[2];
-    return main_loop(capture_path, publish_path);
+    return main_loop(process_path, publish_path);
 }
 
