@@ -396,7 +396,7 @@ process_files_in_dir(app_state* state, char const* dirpath) {
     bool result = false;
 
     struct dirent* ent;
-    int rd_rc, rc;
+    int rd_rc;
     while((rd_rc = readdir_r(dp, state->dent_cache, &ent)) == 0) {
         if (ent == NULL) {
             // end of stream reached
@@ -421,7 +421,7 @@ process_files_in_dir(app_state* state, char const* dirpath) {
         // After possible openat succeeds, unlink the file before doing
         // anything else.  This prevents us from stuck in a loop because of a
         // file we choke on time and time again.
-        rc = unlinkat(dir_fd, ent->d_name, 0);
+        int rc = unlinkat(dir_fd, ent->d_name, 0);
         if (rc == -1) {
             if (pcap_fd != -1) {
                 close(pcap_fd);
@@ -458,11 +458,11 @@ process_files_in_dir(app_state* state, char const* dirpath) {
     }
 
     if (rd_rc != 0) {
-        fprintf(stderr, "readdir_r returned error %d: %s\n", rc, strerror(rc));
+        fprintf(stderr, "readdir_r returned error %d: %s\n", rd_rc, strerror(rd_rc));
         result = false;
     }
 
-    rc = closedir(dp);
+    int rc = closedir(dp);
     if (rc == -1) {
         perror("Couldn't close process directory.");
         result = false;
