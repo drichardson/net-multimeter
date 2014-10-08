@@ -1,0 +1,28 @@
+# Maintainer: Doug Richardson <dougie dot richardson at gmail dot com>
+# Contributor: Doug Richardson <dougie dot richardson at gmail dot com>
+# vim:set ts=2 sw=2 et ft=sh tw=100: expandtab
+
+pkgname=net-multimeter
+pkgver=1.0
+pkgrel=1
+pkgdesc='Network Multimeter'
+arch=('i686' 'x86_64')
+license=('BSD')
+groups=()
+makedepends=()
+optdepends=()
+source=(
+  index.html
+  net-multimeter-nginx.conf
+  net-multimeter-nginx.service.conf
+  )
+
+package(){
+  cd "$srcdir"
+  install -Dm644 index.html "$pkgdir"/usr/share/net-multimeter/html/index.html
+  install -Dm644 net-multimeter-nginx.conf "$pkgdir"/etc/nginx/net-multimeter-nginx.conf
+  install -Dm644 net-multimeter-nginx.service.conf "$pkgdir"/etc/systemd/system/nginx.service.d/net-multimeter-nginx.service.conf
+}
+md5sums=('2a6541befe03ad8a9c303806cdbec8a7'
+         'aefd484103d41dba37c4d30c272994e7'
+         'cf9a26d8978ddb7ada500792d0c450e5')
