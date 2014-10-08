@@ -6,22 +6,25 @@ pkgname=net-multimeter
 pkgver=1.0
 pkgrel=1
 pkgdesc='Network Multimeter'
-arch=('i686' 'x86_64')
+arch=('any')
 license=('BSD')
 groups=()
 makedepends=()
 optdepends=()
-source=(
-  index.html
-  net-multimeter-nginx.conf
-  net-multimeter-nginx.service.conf
-  )
+source=('git@github.com:drichardson/net-multimeter.git')
+
+build() {
+  cd "$pkgname-$pkgver"
+  make -C accumulator
+}
 
 package(){
-  cd "$srcdir"
+  cd "$pkgname-$pkgver"
   install -Dm644 index.html "$pkgdir"/usr/share/net-multimeter/html/index.html
   install -Dm644 net-multimeter-nginx.conf "$pkgdir"/etc/nginx/net-multimeter-nginx.conf
   install -Dm644 net-multimeter-nginx.service.conf "$pkgdir"/etc/systemd/system/nginx.service.d/net-multimeter-nginx.service.conf
+  install -Dm755 accumulator/accumulator "$pkgdir"/usr/bin/accumulator
+  install -Dm755 sampler.sh "$pkgdir"/usr/bin/sampler.sh
 }
 md5sums=('2a6541befe03ad8a9c303806cdbec8a7'
          'aefd484103d41dba37c4d30c272994e7'
