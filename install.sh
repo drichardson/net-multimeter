@@ -1,4 +1,13 @@
 #!/bin/bash
+
+INSTALL_ROOT=$1
+shift
+
+if [ -z "$INSTALL_ROOT" ]; then
+    echo "Usage install.sh <install_root>"
+    exit 1
+fi
+
 set -e
 
 inst() {

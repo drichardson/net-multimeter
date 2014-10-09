@@ -11,21 +11,16 @@ license=('BSD')
 groups=()
 makedepends=()
 optdepends=()
-source=('git@github.com:drichardson/net-multimeter.git')
+depends=('nginx')
+source=('git+https://github.com/drichardson/net-multimeter.git')
 
 build() {
-  cd "$pkgname-$pkgver"
-  make -C accumulator
+  cd "$pkgname"
+  make -C accumulator clean accumulator
 }
 
 package(){
-  cd "$pkgname-$pkgver"
-  install -Dm644 index.html "$pkgdir"/usr/share/net-multimeter/html/index.html
-  install -Dm644 net-multimeter-nginx.conf "$pkgdir"/etc/nginx/net-multimeter-nginx.conf
-  install -Dm644 net-multimeter-nginx.service.conf "$pkgdir"/etc/systemd/system/nginx.service.d/net-multimeter-nginx.service.conf
-  install -Dm755 accumulator/accumulator "$pkgdir"/usr/bin/accumulator
-  install -Dm755 sampler.sh "$pkgdir"/usr/bin/sampler.sh
+  cd "$pkgname"
+  ./install.sh "$pkgdir"
 }
-md5sums=('2a6541befe03ad8a9c303806cdbec8a7'
-         'aefd484103d41dba37c4d30c272994e7'
-         'cf9a26d8978ddb7ada500792d0c450e5')
+md5sums=('SKIP')
