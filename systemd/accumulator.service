@@ -3,8 +3,7 @@ Description=Network Multimeter Accumulator
 
 [Service]
 User=http
-ExecStartPre=mkdir -p /tmp/publish
-ExecStart=/usr/bin/accumulator /tmp/capture /tmp/publish
+ExecStart=/usr/bin/accumulator /tmp/process /tmp/publish/accumulator.json
 
 [Install]
 WantedBy=multi-user.target

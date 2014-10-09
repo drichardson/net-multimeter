@@ -4,6 +4,7 @@
 #include "ipv4.h"
 #include "likely.h"
 #include "mac.h"
+#include "mkdirp.h"
 #include "tcp.h"
 #include "transact_file.h"
 #include "udp.h"
@@ -12,6 +13,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <libgen.h>
 #include <limits.h>
 #include <pcap/pcap.h>
 #include <search.h>
@@ -471,11 +473,22 @@ process_files_in_dir(app_state* state, char const* dirpath) {
     return result;
 }
 
+static bool
+mkdirparts(char const* path, mode_t mode) {
+    char* path_copy = strdup(path);
+    char* dir = dirname(path_copy);
+    int rc = mkdirp(dir, mode);
+    int e = errno;
+    free(path_copy);
+    errno = e;
+    return rc == 0;
+}
+
 static int
 main_loop(char const* process_path, char const* publish_path) {
 
     int result = 1;
-
+ 
     // watch for new files in capture path, and process them when they're closed.
 
     int inote_fd = inotify_init1(IN_CLOEXEC);
@@ -486,7 +499,7 @@ main_loop(char const* process_path, char const* publish_path) {
 
     int watch1 = inotify_add_watch(inote_fd, process_path, IN_MOVED_TO);
     if (watch1 == -1) {
-        perror("inotify_add_watch failed");
+        fprintf(stderr, "inotify_add_watch failed on %s. %s\n", process_path, strerror(errno));
         close(inote_fd);
         return 1;
     }
@@ -555,6 +568,17 @@ int main(int argc, char const** argv) {
 
     char const* process_path = argv[1];
     char const* publish_path = argv[2];
+
+    // This process is responsible for creating the publish path, but not the process path.
+    // The idea being that if you are creating a file, you're responsible for making sure
+    // the output folder exists. If you're reading a file, someone else is responsible for
+    // creating the directories.
+    bool ok = mkdirparts(publish_path, 0755);
+    if (!ok) {
+        perror("Couldn't create publish path");
+        return 1;
+    }
+
     return main_loop(process_path, publish_path);
 }
 

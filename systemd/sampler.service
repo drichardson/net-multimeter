@@ -2,7 +2,7 @@
 Description=Network Multimeter Sampler
 
 [Service]
-ExecStart=/usr/bin/sampler.sh eth0 /tmp/capture
+ExecStart=/usr/bin/sampler.sh eth0 /tmp/capture /tmp/process
 
 [Install]
 WantedBy=multi-user.target
