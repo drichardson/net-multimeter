@@ -1,34 +1,56 @@
 define("poll", ["jquery"], function($) {
     var poll = {};
 
+    poll.Poller = function(url, limit_ms, callback) {
+        var r = {};
+        r.cancelled = false;
+        r.started = false;
+        r._lastReq = null;
 
-    // could either take a callback
-    // or return a deferred whose progress is called whenever a JSON object is received
-    // or poll forever without stopping
-    // or return an object that allows user to cancel
-
-    // returns a Deferred object whose progress calback is made each time a JSON
-    // object is retrieved.
-    var lastTime;
-    poll.getJSONLimit = function(url, limit_ms, callback) {
-        var thisTime = (new Date).getTime();
-        if (typeof lastTime !== "undefined") {
-            console.log("this: " + thisTime + ", last: " + lastTime + ", diff: " + (thisTime - lastTime));
+        r.start = function() {
+            if (r.started) {
+                console.warn("Already started request to url " + url + ". Ignoring.");
+                return;
+            }
+            r.started = true;
+            r.cancelled = false;            
+            r._runOnce(url, limit_ms, callback);
         }
-        lastTime = thisTime;
-        var requestComplete = $.Deferred()
-        var jsonRequest = $.getJSON(url)
-            .done(callback)
-            .always(function () { console.log("req always"); requestComplete.resolve(); });
 
-        var rateLimitTimeout = $.Deferred();
-        setTimeout(function() { console.log("TO"); rateLimitTimeout.resolve(); }, limit_ms);
+        r.cancel = function() {
+            r.cancelled = true;
+            r.started = false;
+            var req = r._lastReq;
+            r._lastReq = null;
+            if (req) {
+                req.abort();
+            }
+        }
 
-        $.when(requestComplete, rateLimitTimeout).always(function() {
-            poll.getJSONLimit(url, limit_ms, callback);
-        });
+        r._runOnce = function(url, limit_ms, callback) {
+            /*
+            var thisTime = (new Date).getTime();
+            if (typeof r.lastTime !== "undefined") {
+                console.log("this: " + thisTime + ", last: " + r.lastTime + ", diff: " + (thisTime - r.lastTime));
+            }
+            r.lastTime = thisTime;
+            */
 
-    };
+            var requestComplete = $.Deferred();
+            r._lastReq = $.getJSON(url).done(callback).always(function () { requestComplete.resolve(); });
+
+            var rateLimitTimeout = $.Deferred();
+            setTimeout(rateLimitTimeout.resolve, limit_ms);
+
+            $.when(requestComplete, rateLimitTimeout).always(function() {
+                if (!r.cancelled) {
+                    r._runOnce(url, limit_ms, callback);
+                }
+            });
+        }
+        
+        return r;
+    }
 
     return poll;
 });
