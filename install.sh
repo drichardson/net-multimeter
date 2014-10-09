@@ -31,5 +31,6 @@ install_executables /usr/bin accumulator/accumulator sampler.sh
 install_files /usr/share/net-multimeter/html html/index.html
 install_files /etc/nginx systemd/net-multimeter-nginx.conf
 install_files /etc/systemd/system/nginx.service.d systemd/net-multimeter-nginx.service.conf 
+install_files /lib/systemd/system systemd/accumulator.service systemd/sampler.service 
 
 echo "OK"
