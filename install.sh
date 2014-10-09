@@ -13,7 +13,7 @@ set -e
 inst() {
     local mode=$1
     shift
-    local dest=$1
+    local dest=$(readlink -m ${INSTALL_ROOT}/$1)
     shift
     mkdir -p -m755 "${dest}"
     install -m${mode} -t "${dest}" $@
