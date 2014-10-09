@@ -7,3 +7,4 @@ a processing directory.
 - accumulator watches a processing directory for pcap files, processes them, and then publishes
 running results to a JSON file.
 - html presents the data from the published JSON file
+- package contains an ArchLinux PKGBUILD
