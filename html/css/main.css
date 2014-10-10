@@ -1,3 +1,21 @@
 html {
     background-color: white;
 }
+
+table {
+    border-spacing: 2px;
+    xborder-color: red;
+}
+
+tr,td {
+    padding: 0;
+    margin: 0;
+}
+
+tr.even {
+    background-color: lightgray;
+}
+
+tr.odd {
+    background-color: yellow;
+}
