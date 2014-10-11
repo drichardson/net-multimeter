@@ -8,28 +8,28 @@ define("poll", ["jquery"], function($) {
         r._lastReq = null;
 
         r.start = function() {
-            if (r.started) {
+            if (this.started) {
                 console.warn("Already started request to url " + url + ". Ignoring.");
                 return;
             }
-            r.started = true;
-            r.cancelled = false;            
-            r._runOnce(url, limit_ms, callback);
+            this.started = true;
+            this.cancelled = false;            
+            _runOnce(this, url, limit_ms, callback);
         }
 
         r.cancel = function() {
-            r.cancelled = true;
-            r.started = false;
-            var req = r._lastReq;
-            r._lastReq = null;
+            this.cancelled = true;
+            this.started = false;
+            var req = this._lastReq;
+            this._lastReq = null;
             if (req) {
                 req.abort();
             }
         }
 
-        r._runOnce = function(url, limit_ms, callback) {
+        function _runOnce(r, url, limit_ms, callback) {
             /*
-            var thisTime = (new Date).getTime();
+            var thisTime = $.now();
             if (typeof r.lastTime !== "undefined") {
                 console.log("this: " + thisTime + ", last: " + r.lastTime + ", diff: " + (thisTime - r.lastTime));
             }
@@ -44,7 +44,7 @@ define("poll", ["jquery"], function($) {
 
             $.when(requestComplete, rateLimitTimeout).always(function() {
                 if (!r.cancelled) {
-                    r._runOnce(url, limit_ms, callback);
+                    _runOnce(r, url, limit_ms, callback);
                 }
             });
         }
